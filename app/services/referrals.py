@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from datetime import datetime, timezone
 
-from sqlalchemy import func, select
+from sqlalchemy import func, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.models import Group, InviteLink, Referral, ReferralMethod, User
@@ -140,6 +140,28 @@ async def user_stats(session: AsyncSession, group_id: int, inviter_id: int) -> d
     }
 
 
+async def chat_stats(session: AsyncSession, group_id: int) -> dict[str, int]:
+    async def count(*conditions) -> int:
+        stmt = select(func.count(Referral.id)).where(
+            Referral.group_id == group_id,
+            *conditions,
+        )
+        return int(await session.scalar(stmt) or 0)
+
+    inviters_stmt = select(func.count(func.distinct(Referral.inviter_id))).where(
+        Referral.group_id == group_id
+    )
+
+    return {
+        "total": await count(),
+        "active": await count(Referral.active.is_(True)),
+        "left": await count(Referral.active.is_(False)),
+        "direct": await count(Referral.method == ReferralMethod.DIRECT_ADD),
+        "link": await count(Referral.method == ReferralMethod.INVITE_LINK),
+        "inviters": int(await session.scalar(inviters_stmt) or 0),
+    }
+
+
 async def leaderboard(session: AsyncSession, group_id: int, active_only: bool) -> list[tuple[int, int]]:
     stmt = (
         select(Referral.inviter_id, func.count(Referral.id).label("count"))
@@ -153,3 +175,48 @@ async def leaderboard(session: AsyncSession, group_id: int, active_only: bool) -
 
     result = await session.execute(stmt)
     return [(int(user_id), int(count)) for user_id, count in result.all()]
+
+
+async def referral_invitees(
+    session: AsyncSession,
+    group_id: int,
+    inviter_id: int,
+    limit: int = 20,
+) -> list[tuple[Referral, User | None]]:
+    stmt = (
+        select(Referral, User)
+        .outerjoin(User, User.user_id == Referral.invitee_id)
+        .where(
+            Referral.group_id == group_id,
+            Referral.inviter_id == inviter_id,
+        )
+        .order_by(Referral.joined_at.desc())
+        .limit(limit)
+    )
+    result = await session.execute(stmt)
+    return list(result.all())
+
+
+async def all_tracked_chats(session: AsyncSession) -> list[Group]:
+    result = await session.scalars(
+        select(Group).order_by(Group.title.asc().nullslast())
+    )
+    return list(result.all())
+
+
+async def known_user_chat_ids(session: AsyncSession, user_id: int) -> set[int]:
+    link_ids = await session.scalars(
+        select(InviteLink.group_id).where(
+            InviteLink.owner_user_id == user_id,
+            InviteLink.revoked.is_(False),
+        )
+    )
+    referral_ids = await session.scalars(
+        select(Referral.group_id).where(
+            or_(
+                Referral.inviter_id == user_id,
+                Referral.invitee_id == user_id,
+            )
+        )
+    )
+    return {int(x) for x in link_ids.all()} | {int(x) for x in referral_ids.all()}
