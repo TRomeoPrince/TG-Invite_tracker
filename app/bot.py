@@ -1,8 +1,9 @@
 import logging
 
-from telegram import Update
+from telegram import BotCommand, Update
 from telegram.ext import (
     Application,
+    CallbackQueryHandler,
     ChatMemberHandler,
     CommandHandler,
     MessageHandler,
@@ -11,7 +12,7 @@ from telegram.ext import (
 
 from app.config import get_settings
 from app.database import init_db
-from app.handlers.commands import leaderboard, link, myinvites, start
+from app.handlers.commands import callbacks, leaderboard, link, myinvites, start, stats
 from app.handlers.members import announce_join_event, track_membership
 
 logging.basicConfig(
@@ -23,7 +24,16 @@ logger = logging.getLogger(__name__)
 
 async def post_init(application: Application) -> None:
     await init_db()
-    logger.info("Database initialized.")
+    await application.bot.set_my_commands(
+        [
+            BotCommand("start", "Open the interactive dashboard"),
+            BotCommand("link", "Get your personal invite link"),
+            BotCommand("myinvites", "View your personal invite stats"),
+            BotCommand("leaderboard", "View the invite leaderboard"),
+            BotCommand("stats", "Admin: view overall chat stats"),
+        ]
+    )
+    logger.info("Database initialized and bot commands registered.")
 
 
 def build_application() -> Application:
@@ -40,8 +50,10 @@ def build_application() -> Application:
     app.add_handler(CommandHandler("link", link))
     app.add_handler(CommandHandler("myinvites", myinvites))
     app.add_handler(CommandHandler("leaderboard", leaderboard))
+    app.add_handler(CommandHandler("stats", stats))
+    app.add_handler(CallbackQueryHandler(callbacks))
 
-    # Authoritative referral attribution.
+    # Authoritative membership/referral attribution.
     app.add_handler(
         ChatMemberHandler(
             track_membership,
@@ -49,8 +61,7 @@ def build_application() -> Application:
         )
     )
 
-    # User-facing confirmation, attached directly to Telegram's native join/add
-    # service message so it is obvious which event was recorded.
+    # Reply to Telegram's visible group join/add service event.
     app.add_handler(
         MessageHandler(
             filters.StatusUpdate.NEW_CHAT_MEMBERS,
@@ -65,7 +76,12 @@ def main() -> None:
     application = build_application()
     logger.info("TG Invite Tracker starting...")
     application.run_polling(
-        allowed_updates=[Update.MESSAGE, Update.CHAT_MEMBER],
+        allowed_updates=[
+            Update.MESSAGE,
+            Update.CHANNEL_POST,
+            Update.CALLBACK_QUERY,
+            Update.CHAT_MEMBER,
+        ],
         drop_pending_updates=False,
     )
 
