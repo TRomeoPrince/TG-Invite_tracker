@@ -177,3 +177,32 @@ async def announce_join_event(
             )
         except Exception:
             pass
+
+
+async def track_bot_membership(
+    update: Update,
+    context: ContextTypes.DEFAULT_TYPE,
+) -> None:
+    """
+    Register the actual chat (including broadcast channels) when this bot is
+    added/promoted there.
+
+    This is separate from CHAT_MEMBER updates, which describe other users.
+    Without MY_CHAT_MEMBER handling, a linked discussion group may be known to
+    the dashboard while its parent channel is not.
+    """
+    change = update.my_chat_member
+    if change is None:
+        return
+
+    chat = change.chat
+    new_status = change.new_chat_member.status
+
+    if new_status in LEFT_STATES:
+        return
+
+    async with SessionLocal() as session:
+        await upsert_group(session, chat)
+        if change.from_user:
+            await upsert_user(session, change.from_user)
+        await session.commit()
