@@ -1,12 +1,18 @@
 import logging
 
 from telegram import Update
-from telegram.ext import Application, ChatMemberHandler, CommandHandler
+from telegram.ext import (
+    Application,
+    ChatMemberHandler,
+    CommandHandler,
+    MessageHandler,
+    filters,
+)
 
 from app.config import get_settings
 from app.database import init_db
 from app.handlers.commands import leaderboard, link, myinvites, start
-from app.handlers.members import track_membership
+from app.handlers.members import announce_join_event, track_membership
 
 logging.basicConfig(
     format="%(asctime)s | %(levelname)s | %(name)s | %(message)s",
@@ -34,7 +40,23 @@ def build_application() -> Application:
     app.add_handler(CommandHandler("link", link))
     app.add_handler(CommandHandler("myinvites", myinvites))
     app.add_handler(CommandHandler("leaderboard", leaderboard))
-    app.add_handler(ChatMemberHandler(track_membership, ChatMemberHandler.CHAT_MEMBER))
+
+    # Authoritative referral attribution.
+    app.add_handler(
+        ChatMemberHandler(
+            track_membership,
+            ChatMemberHandler.CHAT_MEMBER,
+        )
+    )
+
+    # User-facing confirmation, attached directly to Telegram's native join/add
+    # service message so it is obvious which event was recorded.
+    app.add_handler(
+        MessageHandler(
+            filters.StatusUpdate.NEW_CHAT_MEMBERS,
+            announce_join_event,
+        )
+    )
 
     return app
 
