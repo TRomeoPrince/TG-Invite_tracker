@@ -156,6 +156,21 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
             async with SessionLocal() as session:
                 await upsert_user(session, user)
                 await session.commit()
+
+        # Deep link from /link used in a group:
+        # https://t.me/<bot>?start=link_<chat_id>
+        if user and context.args:
+            payload = context.args[0]
+            if payload.startswith("link_"):
+                try:
+                    target_chat_id = int(payload.removeprefix("link_"))
+                except ValueError:
+                    target_chat_id = None
+
+                if target_chat_id is not None:
+                    await _show_link(update, context, target_chat_id, user.id)
+                    return
+
         await _send_or_edit(
             update,
             "🤖 TG Invite Tracker\n\n"
@@ -191,17 +206,33 @@ async def link(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     chat = update.effective_chat
     user = update.effective_user
 
-    if not chat or chat.type not in {ChatType.GROUP, ChatType.SUPERGROUP} or not user:
+    if not chat or not user:
+        return
+
+    if chat.type in {ChatType.GROUP, ChatType.SUPERGROUP}:
+        me = await context.bot.get_me()
+        private_url = f"https://t.me/{me.username}?start=link_{chat.id}"
         await _send_or_edit(
             update,
-            "🔗 Open the bot privately, choose **My Chats**, select a group/channel, then tap **My Invite Link**.",
-            InlineKeyboardMarkup([[InlineKeyboardButton("🏠 Dashboard", callback_data="home")]])
-            if update.callback_query
-            else None,
+            "📩 Your personal invite link will be sent privately so the group stays clean.",
+            InlineKeyboardMarkup(
+                [[InlineKeyboardButton("📩 Get My Invite Link", url=private_url)]]
+            ),
         )
         return
 
-    await _show_link(update, context, chat.id, user.id)
+    if chat.type == ChatType.PRIVATE:
+        await _send_or_edit(
+            update,
+            "🔗 Choose My Chats, select the group/channel, then tap My Invite Link.",
+            InlineKeyboardMarkup([[InlineKeyboardButton("📂 My Chats", callback_data="mychats")]]),
+        )
+        return
+
+    await _send_or_edit(
+        update,
+        "Open the bot privately to get your personal invite link.",
+    )
 
 
 async def _show_link(update: Update, context: ContextTypes.DEFAULT_TYPE, chat_id: int, user_id: int) -> None:
