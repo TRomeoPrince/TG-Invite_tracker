@@ -13,7 +13,7 @@ from telegram.ext import (
 from app.config import get_settings
 from app.database import init_db
 from app.handlers.commands import callbacks, leaderboard, link, myinvites, start, stats
-from app.handlers.members import announce_join_event, track_membership
+from app.handlers.members import announce_join_event, track_bot_membership, track_membership
 
 logging.basicConfig(
     format="%(asctime)s | %(levelname)s | %(name)s | %(message)s",
@@ -53,7 +53,15 @@ def build_application() -> Application:
     app.add_handler(CommandHandler("stats", stats))
     app.add_handler(CallbackQueryHandler(callbacks))
 
-    # Authoritative membership/referral attribution.
+    # Register the exact group/channel where the bot itself is added.
+    app.add_handler(
+        ChatMemberHandler(
+            track_bot_membership,
+            ChatMemberHandler.MY_CHAT_MEMBER,
+        )
+    )
+
+    # Authoritative membership/referral attribution for other users.
     app.add_handler(
         ChatMemberHandler(
             track_membership,
@@ -81,6 +89,7 @@ def main() -> None:
             Update.CHANNEL_POST,
             Update.CALLBACK_QUERY,
             Update.CHAT_MEMBER,
+            Update.MY_CHAT_MEMBER,
         ],
         drop_pending_updates=False,
     )
