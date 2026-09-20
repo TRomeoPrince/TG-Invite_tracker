@@ -40,7 +40,16 @@ def _home_keyboard(bot_username: str) -> InlineKeyboardMarkup:
                 InlineKeyboardButton("🛡 Admin Stats", callback_data="adminchats"),
             ],
             [
-                InlineKeyboardButton("➕ Add to Group", url=f"https://t.me/{bot_username}?startgroup=setup"),
+                InlineKeyboardButton(
+                    "➕ Add to Group",
+                    url=f"https://t.me/{bot_username}?startgroup=setup&admin=invite_users",
+                ),
+                InlineKeyboardButton(
+                    "📢 Add to Channel",
+                    url=f"https://t.me/{bot_username}?startchannel&admin=invite_users",
+                ),
+            ],
+            [
                 InlineKeyboardButton("❓ Help", callback_data="help"),
             ],
         ]
