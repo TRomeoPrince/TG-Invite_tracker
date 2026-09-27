@@ -1,6 +1,6 @@
 # Catalyst Data Store setup
 
-Before deploying the hosted Telegram webhook, create these five tables in **Catalyst Console → Cloud Scale → Data Store**.
+Before deploying the hosted Telegram webhook, create these seven tables in **Catalyst Console → Cloud Scale → Data Store**.
 
 ## 1. TG_Users
 
@@ -81,3 +81,35 @@ Recommended defaults:
 - `Message` → leave blank; the bot falls back to `👋 HI, {USER}! How are you?`
 
 This table stores per-group welcome-message settings. Channels do not use welcome messages.
+
+
+## 6. TG_Contests
+
+| Column | Type |
+| --- | --- |
+| ChatID | Text |
+| Active | Boolean |
+| Name | Text |
+| Prize | Text |
+| Generation | Number |
+
+Recommended defaults:
+
+- `Active` → `false`
+- `Name` → leave blank; the bot falls back to `Invite Contest`
+- `Prize` → leave blank
+- `Generation` → `0`
+
+A new generation is created each time an admin starts a new contest. There is no member-count threshold.
+
+## 7. TG_ContestReferrals
+
+| Column | Type |
+| --- | --- |
+| ChatID | Text |
+| Generation | Number |
+| InviteeID | Text |
+| InviterID | Text |
+| Active | Boolean |
+
+This table keeps contest referrals separate from the all-time referral history. If an invitee leaves, their contest referral becomes inactive rather than being duplicated.
