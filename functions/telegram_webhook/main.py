@@ -708,7 +708,11 @@ def _process_update(app, update: dict):
 def handler(request: Request):
     try:
         if request.method == "GET":
-            return jsonify({"ok": True, "service": "TG Invite Tracker webhook"}), 200
+            return jsonify({
+                "ok": True,
+                "service": "TG Invite Tracker webhook",
+                "bot_token_configured": bool(BOT_TOKEN),
+            }), 200
 
         if request.method != "POST":
             return make_response("Method not allowed", 405)
