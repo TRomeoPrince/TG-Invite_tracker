@@ -18,6 +18,12 @@ JOINED_STATES = {"member", "administrator", "creator", "restricted"}
 LEFT_STATES = {"left", "kicked"}
 CONFIRMATION_DELETE_SECONDS = 10
 
+WELCOME_MESSAGE = (
+    "👋 Welcome, {name}! Glad to have you with us 🎉\n\n"
+    "Feel free to join the conversation, check the pinned messages, "
+    "and use /start with the Invite Tracker bot whenever you want to view your invite tools."
+)
+
 
 async def _delete_later(bot, chat_id: int, message_id: int) -> None:
     await asyncio.sleep(CONFIRMATION_DELETE_SECONDS)
@@ -122,6 +128,15 @@ async def announce_join_event(
     for member in message.new_chat_members:
         if member.is_bot:
             continue
+
+        # Warm welcome for every real member who joins a group/supergroup.
+        try:
+            await message.reply_text(
+                WELCOME_MESSAGE.format(name=member.first_name or "there"),
+                disable_notification=True,
+            )
+        except Exception:
+            pass
 
         # The chat_member update and the service-message update are separate.
         # Give the referral writer a moment to commit, then retry briefly in
