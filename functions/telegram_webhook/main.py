@@ -428,6 +428,24 @@ def _handle_message(app, message: dict):
     _upsert_chat(app, chat)
     _upsert_user(app, user)
 
+    # Telegram service message for new members in groups/supergroups.
+    new_members = message.get("new_chat_members") or []
+    if new_members and chat_type in {"group", "supergroup"}:
+        for new_member in new_members:
+            if new_member.get("is_bot"):
+                continue
+            _upsert_user(app, new_member)
+            _send(
+                chat_id,
+                (
+                    f"👋 Welcome, {new_member.get('first_name') or 'there'}! "
+                    "Glad to have you with us 🎉\n\n"
+                    "Feel free to join the conversation, check the pinned messages, "
+                    "and use /start with the Invite Tracker bot whenever you want to view your invite tools."
+                ),
+                reply_to_message_id=message_id,
+            )
+
     if not text.startswith("/"):
         return
 
