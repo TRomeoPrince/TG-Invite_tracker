@@ -15,6 +15,9 @@ USERS = "TG_Users"
 CHATS = "TG_Chats"
 LINKS = "TG_InviteLinks"
 REFERRALS = "TG_Referrals"
+SETTINGS = "TG_ChatSettings"
+
+DEFAULT_WELCOME = "👋 HI, {USER}! How are you?"
 
 logger = logging.getLogger()
 
@@ -81,7 +84,7 @@ def _upsert_user(app, user: dict | None) -> None:
 
 
 def _upsert_chat(app, chat: dict | None) -> None:
-    if not chat:
+    if not chat or chat.get("type") == "private":
         return
     cid = str(chat["id"])
     table = app.datastore().table(CHATS)
@@ -186,6 +189,44 @@ def _referrals_for(app, chat_id: int | str, inviter_id: int | str | None = None)
     return _select(app, REFERRALS, where)
 
 
+def _get_welcome_settings(app, chat_id: int | str) -> dict:
+    row = _find_one(app, SETTINGS, f"ChatID = '{_escape(chat_id)}'")
+    if not row:
+        return {"Enabled": True, "Message": DEFAULT_WELCOME}
+    return {
+        "Enabled": bool(row.get("Enabled")),
+        "Message": row.get("Message") or DEFAULT_WELCOME,
+    }
+
+
+def _save_welcome_settings(
+    app,
+    chat_id: int | str,
+    *,
+    enabled: bool | None = None,
+    message: str | None = None,
+) -> dict:
+    table = app.datastore().table(SETTINGS)
+    existing = _find_one(app, SETTINGS, f"ChatID = '{_escape(chat_id)}'")
+    current = _get_welcome_settings(app, chat_id)
+    data = {
+        "ChatID": str(chat_id),
+        "Enabled": current["Enabled"] if enabled is None else enabled,
+        "Message": current["Message"] if message is None else message,
+    }
+    if existing:
+        data["ROWID"] = existing["ROWID"]
+        table.update_row(data)
+    else:
+        table.insert_row(data)
+    return data
+
+
+def _render_welcome(template: str, member: dict) -> str:
+    name = member.get("first_name") or member.get("username") or "there"
+    return template.replace("{USER}", name)
+
+
 def _user_name(app, user_id: int | str) -> str:
     row = _find_one(app, USERS, f"TelegramUserID = '{_escape(user_id)}'")
     if not row:
@@ -268,6 +309,9 @@ def _chat_menu(chat_id, admin=False):
         rows.append(
             [{"text": "🛡 Overall Admin Stats", "callback_data": f"adminstats:{chat_id}"}]
         )
+        rows.append(
+            [{"text": "👋 Welcome Settings", "callback_data": f"welsettings:{chat_id}"}]
+        )
     rows.append([{"text": "🏠 Home", "callback_data": "home"}])
     return _keyboard(rows)
 
@@ -296,7 +340,7 @@ def _home_menu():
 
 
 def _tracked_chats(app) -> list[dict]:
-    return _select(app, CHATS)
+    return [row for row in _select(app, CHATS) if row.get("ChatType") != "private"]
 
 
 def _chat_title(app, chat_id) -> str:
@@ -431,20 +475,39 @@ def _handle_message(app, message: dict):
     # Telegram service message for new members in groups/supergroups.
     new_members = message.get("new_chat_members") or []
     if new_members and chat_type in {"group", "supergroup"}:
+        welcome = _get_welcome_settings(app, chat_id)
         for new_member in new_members:
             if new_member.get("is_bot"):
                 continue
             _upsert_user(app, new_member)
-            _send(
-                chat_id,
-                (
-                    f"👋 Welcome, {new_member.get('first_name') or 'there'}! "
-                    "Glad to have you with us 🎉\n\n"
-                    "Feel free to join the conversation, check the pinned messages, "
-                    "and use /start with the Invite Tracker bot whenever you want to view your invite tools."
-                ),
-                reply_to_message_id=message_id,
-            )
+            if welcome["Enabled"]:
+                _send(
+                    chat_id,
+                    _render_welcome(welcome["Message"], new_member),
+                    reply_to_message_id=message_id,
+                )
+
+    # Admin custom welcome message via ForceReply in private chat.
+    reply_to = message.get("reply_to_message") or {}
+    reply_text = reply_to.get("text") or ""
+    if chat_type == "private" and text and reply_text.startswith("✏️ Send the new welcome message for "):
+        marker = "\nChat ID: "
+        if marker in reply_text and user:
+            try:
+                target_chat_id = int(reply_text.split(marker, 1)[1].splitlines()[0].strip())
+            except ValueError:
+                target_chat_id = None
+            if target_chat_id is not None:
+                if not _is_admin(target_chat_id, user["id"]):
+                    return _send(chat_id, "You are no longer an administrator of that chat.")
+                if len(text) > 1000:
+                    return _send(chat_id, "Welcome messages must be 1000 characters or fewer.")
+                _save_welcome_settings(app, target_chat_id, message=text)
+                return _send(
+                    chat_id,
+                    "✅ Custom welcome message saved.\n\nPreview:\n" + text.replace("{USER}", user.get("first_name") or "New Member"),
+                    _keyboard([[{"text": "👋 Welcome Settings", "callback_data": f"welsettings:{target_chat_id}"}]]),
+                )
 
     if not text.startswith("/"):
         return
@@ -580,6 +643,80 @@ def _handle_callback(app, callback: dict):
             message_id,
             "🛡 Your admin chats:" if admins_only else "📂 Your tracked chats:",
             _keyboard(rows),
+        )
+
+    if data.startswith("welsettings:"):
+        try:
+            target_chat_id = int(data.split(":", 1)[1])
+        except ValueError:
+            return
+        if not _is_admin(target_chat_id, user["id"]):
+            return _edit(chat_id, message_id, "You are not an administrator of that chat.")
+        settings = _get_welcome_settings(app, target_chat_id)
+        status = "✅ ON" if settings["Enabled"] else "❌ OFF"
+        title = _chat_title(app, target_chat_id)
+        preview = settings["Message"].replace("{USER}", "New Member")
+        return _edit(
+            chat_id,
+            message_id,
+            f"👋 Welcome Settings — {title}\n\nStatus: {status}\n\nCurrent message:\n{settings['Message']}\n\nPreview:\n{preview}",
+            _keyboard([
+                [
+                    {"text": "✅ Turn ON", "callback_data": f"weltoggle:{target_chat_id}:on"},
+                    {"text": "❌ Turn OFF", "callback_data": f"weltoggle:{target_chat_id}:off"},
+                ],
+                [{"text": "✏️ Set Custom Message", "callback_data": f"welcustom:{target_chat_id}"}],
+                [{"text": "♻️ Reset to Default", "callback_data": f"welreset:{target_chat_id}"}],
+                [{"text": "◀ Chat Menu", "callback_data": f"chat:{target_chat_id}"}],
+            ]),
+        )
+
+    if data.startswith("weltoggle:"):
+        parts2 = data.split(":")
+        if len(parts2) != 3:
+            return
+        try:
+            target_chat_id = int(parts2[1])
+        except ValueError:
+            return
+        if not _is_admin(target_chat_id, user["id"]):
+            return _edit(chat_id, message_id, "You are not an administrator of that chat.")
+        enabled = parts2[2] == "on"
+        _save_welcome_settings(app, target_chat_id, enabled=enabled)
+        return _edit(
+            chat_id,
+            message_id,
+            f"👋 Welcome messages are now {'✅ ON' if enabled else '❌ OFF'}.",
+            _keyboard([[{"text": "👋 Welcome Settings", "callback_data": f"welsettings:{target_chat_id}"}]]),
+        )
+
+    if data.startswith("welreset:"):
+        try:
+            target_chat_id = int(data.split(":", 1)[1])
+        except ValueError:
+            return
+        if not _is_admin(target_chat_id, user["id"]):
+            return _edit(chat_id, message_id, "You are not an administrator of that chat.")
+        _save_welcome_settings(app, target_chat_id, message=DEFAULT_WELCOME)
+        return _edit(
+            chat_id,
+            message_id,
+            "♻️ Welcome message reset to:\n\n" + DEFAULT_WELCOME,
+            _keyboard([[{"text": "👋 Welcome Settings", "callback_data": f"welsettings:{target_chat_id}"}]]),
+        )
+
+    if data.startswith("welcustom:"):
+        try:
+            target_chat_id = int(data.split(":", 1)[1])
+        except ValueError:
+            return
+        if not _is_admin(target_chat_id, user["id"]):
+            return _edit(chat_id, message_id, "You are not an administrator of that chat.")
+        title = _chat_title(app, target_chat_id)
+        return _send(
+            chat_id,
+            f"✏️ Send the new welcome message for {title}\nChat ID: {target_chat_id}\n\nReply to this message with the new welcome text. Use {{USER}} where the new member's name should appear.",
+            {"force_reply": True, "selective": True},
         )
 
     parts = data.split(":")
