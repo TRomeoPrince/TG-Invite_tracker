@@ -16,10 +16,14 @@ CHATS = "TG_Chats"
 LINKS = "TG_InviteLinks"
 REFERRALS = "TG_Referrals"
 SETTINGS = "TG_ChatSettings"
+CONTESTS = "TG_Contests"
+CONTEST_REFS = "TG_ContestReferrals"
 
 DEFAULT_WELCOME = "👋 HI, {USER}! How are you?"
+DEFAULT_CONTEST_NAME = "Invite Contest"
 
 logger = logging.getLogger()
+_BOT_USERNAME_CACHE = None
 
 
 def _api(method: str, **payload):
@@ -227,6 +231,156 @@ def _render_welcome(template: str, member: dict) -> str:
     return template.replace("{USER}", name)
 
 
+def _get_contest(app, chat_id: int | str) -> dict:
+    row = _find_one(app, CONTESTS, f"ChatID = '{_escape(chat_id)}'")
+    if not row:
+        return {
+            "Active": False,
+            "Name": DEFAULT_CONTEST_NAME,
+            "Prize": "",
+            "Generation": 0,
+        }
+    return {
+        "Active": bool(row.get("Active")),
+        "Name": row.get("Name") or DEFAULT_CONTEST_NAME,
+        "Prize": row.get("Prize") or "",
+        "Generation": int(row.get("Generation") or 0),
+    }
+
+
+def _save_contest(
+    app,
+    chat_id: int | str,
+    *,
+    active: bool | None = None,
+    name: str | None = None,
+    prize: str | None = None,
+    start_new: bool = False,
+) -> dict:
+    table = app.datastore().table(CONTESTS)
+    existing = _find_one(app, CONTESTS, f"ChatID = '{_escape(chat_id)}'")
+    current = _get_contest(app, chat_id)
+    generation = current["Generation"] + 1 if start_new else current["Generation"]
+    data = {
+        "ChatID": str(chat_id),
+        "Active": current["Active"] if active is None else active,
+        "Name": current["Name"] if name is None else name,
+        "Prize": current["Prize"] if prize is None else prize,
+        "Generation": generation,
+    }
+    if existing:
+        data["ROWID"] = existing["ROWID"]
+        table.update_row(data)
+    else:
+        table.insert_row(data)
+    return data
+
+
+def _contest_record_referral(app, chat_id, invitee_id, inviter_id) -> None:
+    contest = _get_contest(app, chat_id)
+    if not contest["Active"]:
+        return
+    generation = contest["Generation"]
+    existing = _find_one(
+        app,
+        CONTEST_REFS,
+        f"ChatID = '{_escape(chat_id)}' AND Generation = {generation} "
+        f"AND InviteeID = '{_escape(invitee_id)}'",
+    )
+    table = app.datastore().table(CONTEST_REFS)
+    if existing:
+        table.update_row({"ROWID": existing["ROWID"], "Active": True})
+        return
+    table.insert_row(
+        {
+            "ChatID": str(chat_id),
+            "Generation": generation,
+            "InviteeID": str(invitee_id),
+            "InviterID": str(inviter_id),
+            "Active": True,
+        }
+    )
+
+
+def _contest_mark_left(app, chat_id, invitee_id) -> None:
+    contest = _get_contest(app, chat_id)
+    generation = contest["Generation"]
+    if not generation:
+        return
+    row = _find_one(
+        app,
+        CONTEST_REFS,
+        f"ChatID = '{_escape(chat_id)}' AND Generation = {generation} "
+        f"AND InviteeID = '{_escape(invitee_id)}'",
+    )
+    if row:
+        app.datastore().table(CONTEST_REFS).update_row(
+            {"ROWID": row["ROWID"], "Active": False}
+        )
+
+
+def _contest_rows(app, chat_id) -> list[dict]:
+    contest = _get_contest(app, chat_id)
+    generation = contest["Generation"]
+    if not generation:
+        return []
+    return _select(
+        app,
+        CONTEST_REFS,
+        f"ChatID = '{_escape(chat_id)}' AND Generation = {generation}",
+    )
+
+
+def _contest_announcement(app, chat_id) -> str:
+    contest = _get_contest(app, chat_id)
+    title = _chat_title(app, chat_id)
+    lines = [
+        f"🏆 {contest['Name']} — {title}",
+        "",
+        "Invite friends using your personal invite link or direct adds.",
+        "Every valid active referral counts toward the contest leaderboard.",
+    ]
+    if contest["Prize"]:
+        lines += ["", f"🎁 Reward: {contest['Prize']}"]
+    lines += ["", "Use /link to get your personal invite link.", "Use /leaderboard to check the standings."]
+    return "\n".join(lines)
+
+
+def _show_contest_leaderboard(app, chat_id, target_chat_id, edit_message_id=None):
+    contest = _get_contest(app, chat_id)
+    rows = _contest_rows(app, chat_id)
+    counts: dict[str, int] = {}
+    for row in rows:
+        if not bool(row.get("Active")):
+            continue
+        inviter = str(row["InviterID"])
+        counts[inviter] = counts.get(inviter, 0) + 1
+
+    ordered = sorted(counts.items(), key=lambda item: item[1], reverse=True)[:20]
+    lines = [f"🏆 {contest['Name']} Leaderboard"]
+    if contest["Prize"]:
+        lines.append(f"🎁 Reward: {contest['Prize']}")
+    lines.append("")
+    if not ordered:
+        lines.append("No active contest referrals yet.")
+    else:
+        medals = ["🥇", "🥈", "🥉"]
+        for index, (uid, count) in enumerate(ordered, start=1):
+            prefix = medals[index - 1] if index <= 3 else f"{index}."
+            lines.append(f"{prefix} {_user_name(app, uid)} — {count}")
+    lines.append(_growth_footer().strip())
+
+    markup = _keyboard([
+        [{"text": "🔄 Refresh", "callback_data": f"contestboard:{chat_id}"}],
+        [_add_bot_button()],
+        [{"text": "◀ Contest Settings", "callback_data": f"contestsettings:{chat_id}"}],
+    ])
+    text = "\n".join(lines)
+    if edit_message_id:
+        return _edit(target_chat_id, edit_message_id, text, markup)
+    return _send(target_chat_id, text, markup)
+
+
 def _user_name(app, user_id: int | str) -> str:
     row = _find_one(app, USERS, f"TelegramUserID = '{_escape(user_id)}'")
     if not row:
@@ -291,7 +445,22 @@ def _is_admin(chat_id, user_id) -> bool:
 
 
 def _bot_username() -> str:
-    return _api("getMe").get("username")
+    global _BOT_USERNAME_CACHE
+    if not _BOT_USERNAME_CACHE:
+        _BOT_USERNAME_CACHE = _api("getMe").get("username")
+    return _BOT_USERNAME_CACHE
+
+
+def _growth_footer() -> str:
+    return f"\n\n🤖 Powered by @{_bot_username()}"
+
+
+def _add_bot_button() -> dict:
+    username = _bot_username()
+    return {
+        "text": "➕ Add Inviter Tracker to Your Group",
+        "url": f"https://t.me/{username}?startgroup=setup&admin=invite_users",
+    }
 
 
 def _chat_menu(chat_id, admin=False):
@@ -310,8 +479,12 @@ def _chat_menu(chat_id, admin=False):
             [{"text": "🛡 Overall Admin Stats", "callback_data": f"adminstats:{chat_id}"}]
         )
         rows.append(
-            [{"text": "👋 Welcome Settings", "callback_data": f"welsettings:{chat_id}"}]
+            [
+                {"text": "👋 Welcome Settings", "callback_data": f"welsettings:{chat_id}"},
+                {"text": "🏆 Contest", "callback_data": f"contestsettings:{chat_id}"},
+            ]
         )
+    rows.append([_add_bot_button()])
     rows.append([{"text": "🏠 Home", "callback_data": "home"}])
     return _keyboard(rows)
 
@@ -370,7 +543,8 @@ def _show_link(app, user_id, target_chat_id, private_chat_id, edit_message_id=No
     title = _chat_title(app, target_chat_id)
     text = (
         f"🔗 Your personal invite link\n\n📍 {title}\n{invite_link}\n\n"
-        "Anyone joining through this link is credited to your Telegram user ID."
+        "Anyone joining through this link is credited to your Telegram user ID.\n\n"
+        "Run invite tracking in your own community too — add Inviter Tracker to your group."
     )
     markup = _chat_menu(target_chat_id, _is_admin(target_chat_id, user_id))
     if edit_message_id:
@@ -388,6 +562,7 @@ def _show_my_stats(app, user_id, chat_id, private_chat_id, edit_message_id=None)
         f"❌ Left: {data['left']}\n"
         f"➕ Direct adds: {data['direct']}\n"
         f"🔗 Invite-link joins: {data['link']}"
+        + _growth_footer()
     )
     markup = _chat_menu(chat_id, _is_admin(chat_id, user_id))
     if edit_message_id:
@@ -414,7 +589,7 @@ def _show_leaderboard(app, chat_id, target_chat_id, edit_message_id=None, active
             prefix = medals[index - 1] if index <= 3 else f"{index}."
             lines.append(f"{prefix} {_user_name(app, uid)} — {count}")
         title = "🏆 Active Invite Leaderboard" if active_only else "🏆 All-Time Invite Leaderboard"
-        text = title + "\n\n" + "\n".join(lines)
+        text = title + "\n\n" + "\n".join(lines) + _growth_footer()
 
     markup = _keyboard(
         [
@@ -422,6 +597,7 @@ def _show_leaderboard(app, chat_id, target_chat_id, edit_message_id=None, active
                 {"text": "✅ Active", "callback_data": f"leader:{chat_id}:active"},
                 {"text": "📚 All Time", "callback_data": f"leader:{chat_id}:all"},
             ],
+            [_add_bot_button()],
             [{"text": "◀ Chat Menu", "callback_data": f"chat:{chat_id}"}],
         ]
     )
@@ -449,10 +625,12 @@ def _show_admin_stats(app, chat_id, target_chat_id, user_id=None, edit_message_i
         f"➕ Direct adds: {data['direct']}\n"
         f"🔗 Invite-link joins: {data['link']}\n"
         f"🙋 Inviters: {inviters}"
+        + _growth_footer()
     )
     markup = _keyboard(
         [
             [{"text": "🏆 Leaderboard", "callback_data": f"leader:{chat_id}:active"}],
+            [_add_bot_button()],
             [{"text": "◀ Chat Menu", "callback_data": f"chat:{chat_id}"}],
         ]
     )
@@ -509,6 +687,34 @@ def _handle_message(app, message: dict):
                     _keyboard([[{"text": "👋 Welcome Settings", "callback_data": f"welsettings:{target_chat_id}"}]]),
                 )
 
+    # Admin contest-name / reward setup via ForceReply in private chat.
+    if chat_type == "private" and text and user:
+        contest_name_prefix = "✏️ Send the contest name for "
+        contest_prize_prefix = "🎁 Send the contest reward for "
+        if reply_text.startswith(contest_name_prefix) or reply_text.startswith(contest_prize_prefix):
+            marker = "\nChat ID: "
+            if marker in reply_text:
+                try:
+                    target_chat_id = int(reply_text.split(marker, 1)[1].splitlines()[0].strip())
+                except ValueError:
+                    target_chat_id = None
+                if target_chat_id is not None:
+                    if not _is_admin(target_chat_id, user["id"]):
+                        return _send(chat_id, "You are no longer an administrator of that chat.")
+                    if len(text) > 500:
+                        return _send(chat_id, "Please keep this to 500 characters or fewer.")
+                    if reply_text.startswith(contest_name_prefix):
+                        _save_contest(app, target_chat_id, name=text)
+                        saved = f"✅ Contest name saved as:\n{text}"
+                    else:
+                        _save_contest(app, target_chat_id, prize=text)
+                        saved = f"✅ Contest reward saved as:\n{text}"
+                    return _send(
+                        chat_id,
+                        saved,
+                        _keyboard([[{"text": "🏆 Contest Settings", "callback_data": f"contestsettings:{target_chat_id}"}]]),
+                    )
+
     if not text.startswith("/"):
         return
 
@@ -524,6 +730,26 @@ def _handle_message(app, message: dict):
                     target_chat_id = None
                 if target_chat_id is not None:
                     return _show_link(app, user["id"], target_chat_id, chat_id)
+
+            if args and args[0].startswith("setup_") and user:
+                try:
+                    target_chat_id = int(args[0][6:])
+                except ValueError:
+                    target_chat_id = None
+                if target_chat_id is not None:
+                    if not _is_admin(target_chat_id, user["id"]):
+                        return _send(chat_id, "You need to be an admin of that chat to complete setup.")
+                    title = _chat_title(app, target_chat_id)
+                    return _send(
+                        chat_id,
+                        f"✅ Inviter Tracker setup — {title}\n\n"
+                        "Invite tracking is ready.\n"
+                        "🔗 Personal invite links: ready\n"
+                        "👋 Welcome messages: ON by default\n"
+                        "🏆 Contest tools: ready\n\n"
+                        "Use the buttons below to customize anything you want.",
+                        _chat_menu(target_chat_id, True),
+                    )
 
             return _send(
                 chat_id,
@@ -719,6 +945,136 @@ def _handle_callback(app, callback: dict):
             {"force_reply": True, "selective": True},
         )
 
+    if data.startswith("contestsettings:"):
+        try:
+            target_chat_id = int(data.split(":", 1)[1])
+        except ValueError:
+            return
+        if not _is_admin(target_chat_id, user["id"]):
+            return _edit(chat_id, message_id, "You are not an administrator of that chat.")
+        contest = _get_contest(app, target_chat_id)
+        title = _chat_title(app, target_chat_id)
+        status = "✅ RUNNING" if contest["Active"] else "⏸ OFF"
+        reward = contest["Prize"] or "Not set"
+        return _edit(
+            chat_id,
+            message_id,
+            f"🏆 Contest Settings — {title}\n\n"
+            f"Status: {status}\n"
+            f"Contest: {contest['Name']}\n"
+            f"Reward: {reward}\n\n"
+            "No member-count threshold is required. Start it whenever you want.",
+            _keyboard([
+                [
+                    {"text": "▶️ Start New Contest", "callback_data": f"conteststart:{target_chat_id}"},
+                    {"text": "⏹ Stop", "callback_data": f"conteststop:{target_chat_id}"},
+                ],
+                [
+                    {"text": "✏️ Set Name", "callback_data": f"contestname:{target_chat_id}"},
+                    {"text": "🎁 Set Reward", "callback_data": f"contestprize:{target_chat_id}"},
+                ],
+                [{"text": "📣 Announce Contest", "callback_data": f"contestannounce:{target_chat_id}"}],
+                [{"text": "🏆 Contest Leaderboard", "callback_data": f"contestboard:{target_chat_id}"}],
+                [{"text": "◀ Chat Menu", "callback_data": f"chat:{target_chat_id}"}],
+            ]),
+        )
+
+    if data.startswith("conteststart:"):
+        try:
+            target_chat_id = int(data.split(":", 1)[1])
+        except ValueError:
+            return
+        if not _is_admin(target_chat_id, user["id"]):
+            return _edit(chat_id, message_id, "You are not an administrator of that chat.")
+        contest = _save_contest(app, target_chat_id, active=True, start_new=True)
+        try:
+            _send(target_chat_id, _contest_announcement(app, target_chat_id))
+        except Exception:
+            pass
+        return _edit(
+            chat_id,
+            message_id,
+            f"✅ {contest['Name']} has started.\n\nOnly referrals recorded from this new contest onward count in its leaderboard.",
+            _keyboard([[{"text": "🏆 Contest Settings", "callback_data": f"contestsettings:{target_chat_id}"}]]),
+        )
+
+    if data.startswith("conteststop:"):
+        try:
+            target_chat_id = int(data.split(":", 1)[1])
+        except ValueError:
+            return
+        if not _is_admin(target_chat_id, user["id"]):
+            return _edit(chat_id, message_id, "You are not an administrator of that chat.")
+        _save_contest(app, target_chat_id, active=False)
+        return _edit(
+            chat_id,
+            message_id,
+            "⏹ Contest stopped. The current contest leaderboard remains available for review.",
+            _keyboard([[{"text": "🏆 Contest Settings", "callback_data": f"contestsettings:{target_chat_id}"}]]),
+        )
+
+    if data.startswith("contestname:"):
+        try:
+            target_chat_id = int(data.split(":", 1)[1])
+        except ValueError:
+            return
+        if not _is_admin(target_chat_id, user["id"]):
+            return _edit(chat_id, message_id, "You are not an administrator of that chat.")
+        title = _chat_title(app, target_chat_id)
+        return _send(
+            chat_id,
+            f"✏️ Send the contest name for {title}\nChat ID: {target_chat_id}\n\nReply to this message with the contest name.",
+            {"force_reply": True, "selective": True},
+        )
+
+    if data.startswith("contestprize:"):
+        try:
+            target_chat_id = int(data.split(":", 1)[1])
+        except ValueError:
+            return
+        if not _is_admin(target_chat_id, user["id"]):
+            return _edit(chat_id, message_id, "You are not an administrator of that chat.")
+        title = _chat_title(app, target_chat_id)
+        return _send(
+            chat_id,
+            f"🎁 Send the contest reward for {title}\nChat ID: {target_chat_id}\n\nReply with the reward/prize text.",
+            {"force_reply": True, "selective": True},
+        )
+
+    if data.startswith("contestannounce:"):
+        try:
+            target_chat_id = int(data.split(":", 1)[1])
+        except ValueError:
+            return
+        if not _is_admin(target_chat_id, user["id"]):
+            return _edit(chat_id, message_id, "You are not an administrator of that chat.")
+        contest = _get_contest(app, target_chat_id)
+        if not contest["Active"]:
+            return _edit(
+                chat_id,
+                message_id,
+                "Start the contest first, then announce it.",
+                _keyboard([[{"text": "🏆 Contest Settings", "callback_data": f"contestsettings:{target_chat_id}"}]]),
+            )
+        try:
+            _send(target_chat_id, _contest_announcement(app, target_chat_id))
+            result = "📣 Contest announcement posted."
+        except Exception:
+            result = "I couldn't post in that chat. Check that the bot has permission to send messages."
+        return _edit(
+            chat_id,
+            message_id,
+            result,
+            _keyboard([[{"text": "🏆 Contest Settings", "callback_data": f"contestsettings:{target_chat_id}"}]]),
+        )
+
+    if data.startswith("contestboard:"):
+        try:
+            target_chat_id = int(data.split(":", 1)[1])
+        except ValueError:
+            return
+        return _show_contest_leaderboard(app, target_chat_id, chat_id, message_id)
+
     parts = data.split(":")
     action = parts[0]
     if len(parts) < 2:
@@ -811,7 +1167,9 @@ def _handle_chat_member(app, change: dict):
     left = old_status in joined_states and new_status in left_states
 
     if left:
-        return _mark_left(app, chat["id"], member["id"])
+        _mark_left(app, chat["id"], member["id"])
+        _contest_mark_left(app, chat["id"], member["id"])
+        return
     if not joined:
         return
 
@@ -833,18 +1191,75 @@ def _handle_chat_member(app, change: dict):
         method = "DIRECT_ADD"
 
     if inviter_id and str(inviter_id) != str(member["id"]):
-        _record_referral(
+        is_new = _record_referral(
             app,
             chat["id"],
             member["id"],
             inviter_id,
             method,
         )
+        if is_new:
+            _contest_record_referral(
+                app,
+                chat["id"],
+                member["id"],
+                inviter_id,
+            )
 
 
 def _handle_my_chat_member(app, change: dict):
-    _upsert_chat(app, change.get("chat"))
-    _upsert_user(app, change.get("from"))
+    chat = change.get("chat") or {}
+    actor = change.get("from")
+    new_member = change.get("new_chat_member") or {}
+    old_member = change.get("old_chat_member") or {}
+
+    _upsert_chat(app, chat)
+    _upsert_user(app, actor)
+
+    new_status = new_member.get("status")
+    old_status = old_member.get("status")
+    if new_status not in {"member", "administrator", "creator"}:
+        return
+    if new_status == old_status:
+        return
+
+    chat_id = chat.get("id")
+    if not chat_id:
+        return
+
+    username = _bot_username()
+    setup_url = f"https://t.me/{username}?start=setup_{chat_id}"
+
+    if new_status in {"administrator", "creator"}:
+        can_invite = bool(new_member.get("can_invite_users", True))
+        if can_invite:
+            text = (
+                "✅ Inviter Tracker is ready!\n\n"
+                "I can now track direct adds and personal invite links.\n"
+                "👋 Welcome messages are ON by default.\n"
+                "🏆 Contest tools are ready whenever you need them.\n\n"
+                "Admin: tap below to finish/customize setup."
+            )
+        else:
+            text = (
+                "⚠️ Almost ready.\n\n"
+                "Please give me the Invite Users / Manage Invite Links permission so I can create personal invite links.\n\n"
+                "Then tap below to finish setup."
+            )
+    else:
+        text = (
+            "👋 Inviter Tracker has been added.\n\n"
+            "To enable invite tracking and personal invite links, promote me to admin and allow Invite Users / Manage Invite Links."
+        )
+
+    try:
+        _send(
+            chat_id,
+            text,
+            _keyboard([[{"text": "⚙️ Complete Setup", "url": setup_url}]]),
+        )
+    except Exception:
+        pass
 
 
 def _process_update(app, update: dict):
