@@ -1,6 +1,6 @@
 # Catalyst Data Store setup
 
-Before deploying the hosted Telegram webhook, create these four tables in **Catalyst Console → Cloud Scale → Data Store**.
+Before deploying the hosted Telegram webhook, create these five tables in **Catalyst Console → Cloud Scale → Data Store**.
 
 ## 1. TG_Users
 
@@ -65,3 +65,19 @@ The hosted function accepts:
 
 - GET: health check
 - POST: Telegram webhook updates
+
+
+## 5. TG_ChatSettings
+
+| Column | Type |
+| --- | --- |
+| ChatID | Text |
+| Enabled | Boolean |
+| Message | Text |
+
+Recommended defaults:
+
+- `Enabled` → `true`
+- `Message` → leave blank; the bot falls back to `👋 HI, {USER}! How are you?`
+
+This table stores per-group welcome-message settings. Channels do not use welcome messages.
