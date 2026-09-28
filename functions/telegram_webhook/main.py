@@ -417,6 +417,14 @@ def _send(chat_id, text, reply_markup=None, reply_to_message_id=None):
     return _api("sendMessage", **payload)
 
 
+def _delete_message(chat_id, message_id):
+    try:
+        return _api("deleteMessage", chat_id=chat_id, message_id=message_id)
+    except Exception:
+        # Ignore permission/race errors so cleanup never breaks tracking.
+        return None
+
+
 def _edit(chat_id, message_id, text, reply_markup=None):
     payload = {"chat_id": chat_id, "message_id": message_id, "text": text}
     if reply_markup:
@@ -650,8 +658,10 @@ def _handle_message(app, message: dict):
     _upsert_chat(app, chat)
     _upsert_user(app, user)
 
-    # Telegram service message for new members in groups/supergroups.
+    # Telegram service messages for group joins/leaves.
     new_members = message.get("new_chat_members") or []
+    left_member = message.get("left_chat_member")
+
     if new_members and chat_type in {"group", "supergroup"}:
         welcome = _get_welcome_settings(app, chat_id)
         for new_member in new_members:
@@ -664,6 +674,18 @@ def _handle_message(app, message: dict):
                     _render_welcome(welcome["Message"], new_member),
                     reply_to_message_id=message_id,
                 )
+
+        # Remove Telegram's native "X joined..." service message after the
+        # welcome has been sent so busy groups stay clean.
+        if message_id:
+            _delete_message(chat_id, message_id)
+
+    if left_member and chat_type in {"group", "supergroup"}:
+        # Membership state/referral tracking is handled by chat_member updates.
+        # The visible native "X left the group" service message is just clutter.
+        if message_id:
+            _delete_message(chat_id, message_id)
+        return
 
     # Admin custom welcome message via ForceReply in private chat.
     reply_to = message.get("reply_to_message") or {}
